@@ -44,8 +44,8 @@ struct Environment
     Environment()
         : base(current_path())
         , src("src")
-        , dep(".reprise/dep")
-        , obj(".reprise/obj")
+        , dep(".respite/dep")
+        , obj(".respite/obj")
         , bin(".")
         , cxx(getenv_safe("CXX"))
         , cxxflags(getenv_safe("CXXFLAGS"))
@@ -467,7 +467,7 @@ int main(int argc, char* argv[])
 
     // BUILD EXECUTABLE
 
-    path exe = env.bin/"a.reprise";
+    path exe = env.bin/"a.respite";
     bool needs_build = false;
 
     if (!exists(exe))
