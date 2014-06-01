@@ -14,6 +14,36 @@ using namespace std;
 using namespace boost;
 using namespace boost::filesystem;
 
+path normalize(path source)
+{
+    path rv;
+
+    for (path p : source)
+    {
+        if (p == ".")
+        {
+            // nope
+        }
+        else if (p == "..")
+        {
+            if (rv.empty() || is_symlink(rv))
+            {
+                rv /= p;
+            }
+            else
+            {
+                rv.remove_filename();
+            }
+        }
+        else
+        {
+            rv /= p;
+        }
+    }
+
+    return rv;
+}
+
 template <typename T>
 string make_string(T&& t)
 {
@@ -22,20 +52,21 @@ string make_string(T&& t)
     return ss.str();
 }
 
-string const& make_string(string const& str)
+string make_string(string str)
 {
     return str;
 }
 
 template <typename... Ts>
-void dbg(Ts&&... us)
+void jecho(Ts&&... us)
 {
     vector<string> strs = {
         make_string(us)...
     };
+    cout << "[J] ";
     for (auto&& str : strs)
-        clog << str;
-    clog << endl;
+        cout << str;
+    cout << endl;
 }
 
 vector<directory_entry> recursive_list(path p)
@@ -118,6 +149,8 @@ vector<path> get_src_deps(path srcfile, string const& cxxflags)
             deps.push_back(word);
     }
 
+    transform(begin(deps), end(deps), begin(deps), normalize);
+
     return deps;
 }
 
@@ -157,11 +190,12 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
 
     path deppath = dep/f;
     deppath.replace_extension(".dep");
+    deppath = normalize(deppath);
 
     bool deppath_exists = exists(deppath);
 
-    dbg("Parsing depfile ", deppath);
-    dbg("  Depfile exists: ", (deppath_exists?"Yes":"No"));
+    jecho("Parsing depfile ", deppath);
+    jecho("  Depfile exists: ", (deppath_exists?"Yes":"No"));
 
     auto make_it = [&]
     {
@@ -184,6 +218,8 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
 
     auto target_time = last_write_time(deppath);
 
+    bool reparse = false;
+
     for (auto&& f : deps)
     {
         bool f_exists = exists(f);
@@ -193,26 +229,36 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
 
         if (!f_exists || f_newer)
         {
-            dbg("  Remaking depfile...");
+            jecho("  Remaking depfile...");
             deps = make_it();
+            reparse = true;
+            rv.newest = time_t{};
             break;
-        }
-    }
-
-    for (auto&& f : deps)
-    {
-        bool f_exists = exists(f);
-        time_t f_time = (f_exists?last_write_time(f):time_t{});
-
-        if (!f_exists)
-        {
-            rv.missing_dep = true;
-            dbg("  Missing dep: ", f);
         }
         else
         {
             if (f_time > rv.newest)
                 rv.newest = f_time;
+        }
+    }
+
+    if (reparse)
+    {
+        for (auto&& f : deps)
+        {
+            bool f_exists = exists(f);
+            time_t f_time = (f_exists?last_write_time(f):time_t{});
+
+            if (!f_exists)
+            {
+                rv.missing_dep = true;
+                jecho("  Missing dep: ", f);
+            }
+            else
+            {
+                if (f_time > rv.newest)
+                    rv.newest = f_time;
+            }
         }
     }
 
@@ -225,15 +271,19 @@ bool build_obj(path src, path f, path obj, string const& cxxflags)
 
     path objfile = obj/f;
     objfile.replace_extension(".o");
+    objfile = normalize(objfile);
+
+    path srcfile = normalize(src/f);
 
     args_ss << cxxflags << " ";
-    args_ss << "-c " << src/f << " ";
+    args_ss << "-c " << srcfile << " ";
     args_ss << "-o " << objfile << " ";
 
     string args = args_ss.str();
 
-    dbg("Building object ", objfile);
-    dbg("  Command: g++ ", args);
+    jecho("Building object ", objfile);
+    jecho("  Command: g++ ", args);
+    jecho();
 
     return run_command("g++", args);
 }
@@ -244,14 +294,15 @@ bool build_exe(path exe, vector<path> const& objs, string const& ldflags, string
 
     args_ss << ldflags << " ";
     for (auto&& p : objs)
-        args_ss << p << " ";
+        args_ss << normalize(p) << " ";
     args_ss << ldlibs << " ";
-    args_ss << "-o " << exe << " ";
+    args_ss << "-o " << normalize(exe) << " ";
 
     string args = args_ss.str();
 
-    dbg("Building executable ", exe);
-    dbg("  Command: g++ ", args);
+    jecho("Building executable ", normalize(exe));
+    jecho("  Command: g++ ", args);
+    jecho();
 
     return run_command("g++", args);
 }
@@ -260,9 +311,9 @@ int main(int argc, char* argv[])
 {
     path base = current_path();
 
-    path src = "./src";
-    path dep = "./.jbuild/dep";
-    path obj = "./.jbuild/obj";
+    path src = "src";
+    path dep = ".jbuild/dep";
+    path obj = ".jbuild/obj";
     path bin = ".";
 
     // READ COMMAND LINE
@@ -307,6 +358,7 @@ int main(int argc, char* argv[])
 
     for (auto&& ent : src_files)
     {
+        normalize(ent);
         if (is_directory(ent.status()))
         {
             auto make_it = [&](path tget)
@@ -323,6 +375,7 @@ int main(int argc, char* argv[])
     // GENERATE MISSING/OUTDATED DEP FILES
 
     vector<path> objs;
+    vector<path> objs_rebuild;
 
     for (auto&& ent : src_files)
     {
@@ -334,9 +387,12 @@ int main(int argc, char* argv[])
 
             if (ext == ".cpp")
             {
+                jecho("Found source file ", ent);
+
                 auto dep_data = process_dep_file(src, ent.path(), dep, cxxflags);
                 path objfile = obj/ent.path();
                 objfile.replace_extension(".o");
+                objfile = normalize(objfile);
 
                 objs.push_back(objfile);
 
@@ -348,35 +404,55 @@ int main(int argc, char* argv[])
 
                 if (!obj_rebuild && dep_data.missing_dep)
                 {
-                    dbg("Missing dependency for ", objfile);
+                    jecho("Missing dependency for ", objfile);
 
-                    cerr << endl << "BUILD FAILED" << endl;
+                    jecho("BUILD FAILED");
                     return 1;
                 }
 
                 if (!obj_rebuild && !obj_exists)
                 {
                     obj_rebuild = true;
-                    dbg("Missing object ", objfile);
+                    jecho("Missing object ", objfile);
                 }
 
                 if (!obj_rebuild && obj_outdated)
                 {
                     obj_rebuild = true;
-                    dbg("Out-of-date object ", objfile);
+                    jecho("Out-of-date object ", objfile);
                 }
 
                 if (!obj_exists || obj_outdated)
                 {
-                    auto success = build_obj(src, ent.path(), obj, cxxflags);
-                    if (!success)
-                    {
-                        cerr << endl << "BUILD FAILED" << endl;
-                        return 1;
-                    }
+                    objs_rebuild.emplace_back(ent.path());
                 }
+
+                jecho();
             }
         }
+    }
+
+    // BUILD OBJS
+
+    if (!objs_rebuild.empty())
+    {
+        jecho("Rebuilding ", objs_rebuild.size(), " objects...");
+        jecho();
+
+        for (auto&& f : objs_rebuild)
+        {
+            auto success = build_obj(src, f, obj, cxxflags);
+            if (!success)
+            {
+                jecho("BUILD FAILED");
+                return 1;
+            }
+        }
+    }
+    else
+    {
+        jecho("All objects are up-to-date!");
+        jecho();
     }
 
     // BUILD EXECUTABLE
@@ -409,10 +485,10 @@ int main(int argc, char* argv[])
         auto success = build_exe(exe, objs, ldflags, ldlibs);
         if (!success)
         {
-            cerr << endl << "BUILD FAILED" << endl;
+            jecho("BUILD FAILED");
             return 1;
         }
     }
 
-    cerr << endl << "BUILD SUCCESS" << endl;
+    jecho("BUILD SUCCESS");
 }
