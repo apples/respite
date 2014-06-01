@@ -78,6 +78,25 @@ _scope_cd_type push_dir(path p)
     return _scope_cd_type(p);
 }
 
+bool run_command(string const& exe, string const& args)
+{
+    exec_stream_t es;
+    es.set_wait_timeout(exec_stream_t::s_all, 60000);
+    es.set_buffer_limit(exec_stream_t::s_all, 0);
+    es.start(exe, args);
+
+    string line;
+
+    while (getline(es.err(),line))
+    {
+        cerr << line << endl;
+    }
+
+    while (!es.close());
+
+    return (es.exit_code() == 0);
+}
+
 vector<path> get_src_deps(path srcfile, string const& cxxflags)
 {
     vector<path> deps;
@@ -88,7 +107,7 @@ vector<path> get_src_deps(path srcfile, string const& cxxflags)
     args << "-MM -MT \"\" ";
     args << cxxflags << " ";
     args << srcfile;
-    
+
     exec_stream_t es;
     es.set_wait_timeout(exec_stream_t::s_all, 60000);
     es.start("g++", args.str());
@@ -122,14 +141,14 @@ void write_dep_file(path f, vector<path> const& deps)
 
     for (auto&& p : deps)
     {
-        depfile << p << endl;
+        depfile << p.string() << endl;
     }
 }
 
 struct DepData
 {
-    bool needs_remake = true;
-    time_t newest = 0;
+    bool missing_dep = false;
+    time_t newest = time_t{};
 };
 
 DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
@@ -139,86 +158,102 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
     path deppath = dep/f;
     deppath.replace_extension(".dep");
 
+    bool deppath_exists = exists(deppath);
+
+    dbg("Parsing depfile ", deppath);
+    dbg("  Depfile exists: ", (deppath_exists?"Yes":"No"));
+
     auto make_it = [&]
     {
-        dbg("Creating dep file ", deppath, "...");
         auto newdeps = get_src_deps(src/f, cxxflags);
         write_dep_file(deppath, newdeps);
+        return newdeps;
     };
 
-    auto get_time = [&](path p)
+    auto deps = [&]
     {
-        auto t = last_write_time(p);
-        if (t>rv.newest) rv.newest = t;
-        return t;
-    };
-    
-    if (exists(deppath))
-    {
-        auto target_time = last_write_time(deppath);
-        auto deps = read_dep_file(deppath);
-
-        for (auto&& f : deps)
+        if (!deppath_exists)
         {
-            if (!exists(f) || get_time(f)>target_time)
-            {
-                make_it();
-                return rv;
-            }
+            return make_it();
+        }
+        else
+        {
+            return read_dep_file(deppath);
+        }
+    }();
+
+    auto target_time = last_write_time(deppath);
+
+    for (auto&& f : deps)
+    {
+        bool f_exists = exists(f);
+        time_t f_time = (f_exists?last_write_time(f):time_t{});
+
+        bool f_newer = f_time>target_time;
+
+        if (!f_exists || f_newer)
+        {
+            dbg("  Remaking depfile...");
+            deps = make_it();
+            break;
         }
     }
-    else
+
+    for (auto&& f : deps)
     {
-        make_it();
-        return rv;
+        bool f_exists = exists(f);
+        time_t f_time = (f_exists?last_write_time(f):time_t{});
+
+        if (!f_exists)
+        {
+            rv.missing_dep = true;
+            dbg("  Missing dep: ", f);
+        }
+        else
+        {
+            if (f_time > rv.newest)
+                rv.newest = f_time;
+        }
     }
 
-    rv.needs_remake = false;
     return rv;
 }
 
 bool build_obj(path src, path f, path obj, string const& cxxflags)
 {
-    stringstream args;
+    stringstream args_ss;
 
     path objfile = obj/f;
     objfile.replace_extension(".o");
 
-    args << cxxflags << " ";
-    args << "-c " << src/f << " ";
-    args << "-o " << objfile << " ";
-    
-    exec_stream_t es;
-    es.set_wait_timeout(exec_stream_t::s_all, 60000);
-    es.set_buffer_limit(exec_stream_t::s_all, 0);
-    es.start("g++", args.str());
+    args_ss << cxxflags << " ";
+    args_ss << "-c " << src/f << " ";
+    args_ss << "-o " << objfile << " ";
 
-    cerr << es.out();
+    string args = args_ss.str();
 
-    while (!es.close());
+    dbg("Building object ", objfile);
+    dbg("  Command: g++ ", args);
 
-    return (es.exit_code() == 0);
+    return run_command("g++", args);
 }
 
-bool build_exe(path exe, vector<path> const& objs, string const& ldflags)
+bool build_exe(path exe, vector<path> const& objs, string const& ldflags, string const& ldlibs)
 {
-    stringstream args;
+    stringstream args_ss;
 
-    args << ldflags << " ";
+    args_ss << ldflags << " ";
     for (auto&& p : objs)
-        args << p << " ";
-    args << "-o " << exe << " ";
-    
-    exec_stream_t es;
-    es.set_wait_timeout(exec_stream_t::s_all, 60000);
-    es.set_buffer_limit(exec_stream_t::s_all, 0);
-    es.start("g++", args.str());
+        args_ss << p << " ";
+    args_ss << ldlibs << " ";
+    args_ss << "-o " << exe << " ";
 
-    cerr << es.out();
+    string args = args_ss.str();
 
-    while (!es.close());
+    dbg("Building executable ", exe);
+    dbg("  Command: g++ ", args);
 
-    return (es.exit_code() == 0);
+    return run_command("g++", args);
 }
 
 int main(int argc, char* argv[])
@@ -226,35 +261,44 @@ int main(int argc, char* argv[])
     path base = current_path();
 
     path src = "./src";
-    path dep = "./dep";
-    path obj = "./obj";
-    path bin = "./bin";
+    path dep = "./.jbuild/dep";
+    path obj = "./.jbuild/obj";
+    path bin = ".";
 
     // READ COMMAND LINE
 
-    stringstream ss_cxx;
-    stringstream ss_ld;
-    stringstream* ssp = &ss_cxx;
+    stringstream ss3[3];
+
+    auto& ss_cxx = ss3[0];
+    auto& ss_ld = ss3[1];
+    auto& ss_libs = ss3[2];
+    stringstream* ssp = &ss3[0];
 
     ++argv;
 
     while (*argv)
     {
-        if (*argv == "--")
+        string arg = *argv++;
+
+        if (arg == "---")
         {
-            ssp = &ss_ld;
+            ++ssp;
         }
         else
         {
-            *ssp << *argv << " ";
+            *ssp << arg << " ";
         }
     }
 
     string cxxflags = ss_cxx.str();
     string ldflags = ss_ld.str();
+    string ldlibs = ss_libs.str();
 
     // CREATE DIRECTORIES
-    
+
+    create_directories(dep);
+    create_directories(obj);
+
     auto src_files = [&]
     {
         auto _ = push_dir(src);
@@ -276,8 +320,6 @@ int main(int argc, char* argv[])
         }
     }
 
-    create_directories(bin);
-
     // GENERATE MISSING/OUTDATED DEP FILES
 
     vector<path> objs;
@@ -298,9 +340,33 @@ int main(int argc, char* argv[])
 
                 objs.push_back(objfile);
 
-                if (dep_data.needs_remake
-                    || !exists(objfile)
-                    || dep_data.newest>last_write_time(objfile))
+                bool obj_exists = exists(objfile);
+                time_t obj_time = (obj_exists?last_write_time(objfile):time_t{});
+                bool obj_outdated = (obj_exists?dep_data.newest>obj_time:true);
+
+                bool obj_rebuild = false;
+
+                if (!obj_rebuild && dep_data.missing_dep)
+                {
+                    dbg("Missing dependency for ", objfile);
+
+                    cerr << endl << "BUILD FAILED" << endl;
+                    return 1;
+                }
+
+                if (!obj_rebuild && !obj_exists)
+                {
+                    obj_rebuild = true;
+                    dbg("Missing object ", objfile);
+                }
+
+                if (!obj_rebuild && obj_outdated)
+                {
+                    obj_rebuild = true;
+                    dbg("Out-of-date object ", objfile);
+                }
+
+                if (!obj_exists || obj_outdated)
                 {
                     auto success = build_obj(src, ent.path(), obj, cxxflags);
                     if (!success)
@@ -340,7 +406,7 @@ int main(int argc, char* argv[])
 
     if (needs_build)
     {
-        auto success = build_exe(exe, objs, ldflags);
+        auto success = build_exe(exe, objs, ldflags, ldlibs);
         if (!success)
         {
             cerr << endl << "BUILD FAILED" << endl;
@@ -350,4 +416,3 @@ int main(int argc, char* argv[])
 
     cerr << endl << "BUILD SUCCESS" << endl;
 }
-
