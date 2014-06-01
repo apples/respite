@@ -58,12 +58,12 @@ string make_string(string str)
 }
 
 template <typename... Ts>
-void jecho(Ts&&... us)
+void print(Ts&&... us)
 {
     vector<string> strs = {
         make_string(us)...
     };
-    cout << "[J] ";
+    cout << "[Reprise] ";
     for (auto&& str : strs)
         cout << str;
     cout << endl;
@@ -194,8 +194,8 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
 
     bool deppath_exists = exists(deppath);
 
-    jecho("Parsing depfile ", deppath);
-    jecho("  Depfile exists: ", (deppath_exists?"Yes":"No"));
+    print("Parsing depfile ", deppath);
+    print("  Depfile exists: ", (deppath_exists?"Yes":"No"));
 
     auto make_it = [&]
     {
@@ -229,7 +229,7 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
 
         if (!f_exists || f_newer)
         {
-            jecho("  Remaking depfile...");
+            print("  Remaking depfile...");
             deps = make_it();
             reparse = true;
             rv.newest = time_t{};
@@ -252,7 +252,7 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
             if (!f_exists)
             {
                 rv.missing_dep = true;
-                jecho("  Missing dep: ", f);
+                print("  Missing dep: ", f);
             }
             else
             {
@@ -281,9 +281,9 @@ bool build_obj(path src, path f, path obj, string const& cxxflags)
 
     string args = args_ss.str();
 
-    jecho("Building object ", objfile);
-    jecho("  Command: g++ ", args);
-    jecho();
+    print("Building object ", objfile);
+    print("  Command: g++ ", args);
+    print();
 
     return run_command("g++", args);
 }
@@ -300,9 +300,9 @@ bool build_exe(path exe, vector<path> const& objs, string const& ldflags, string
 
     string args = args_ss.str();
 
-    jecho("Building executable ", normalize(exe));
-    jecho("  Command: g++ ", args);
-    jecho();
+    print("Building executable ", normalize(exe));
+    print("  Command: g++ ", args);
+    print();
 
     return run_command("g++", args);
 }
@@ -312,8 +312,8 @@ int main(int argc, char* argv[])
     path base = current_path();
 
     path src = "src";
-    path dep = ".jbuild/dep";
-    path obj = ".jbuild/obj";
+    path dep = ".reprise/dep";
+    path obj = ".reprise/obj";
     path bin = ".";
 
     // READ COMMAND LINE
@@ -387,7 +387,7 @@ int main(int argc, char* argv[])
 
             if (ext == ".cpp")
             {
-                jecho("Found source file ", ent);
+                print("Found source file ", ent);
 
                 auto dep_data = process_dep_file(src, ent.path(), dep, cxxflags);
                 path objfile = obj/ent.path();
@@ -404,22 +404,22 @@ int main(int argc, char* argv[])
 
                 if (!obj_rebuild && dep_data.missing_dep)
                 {
-                    jecho("Missing dependency for ", objfile);
+                    print("Missing dependency for ", objfile);
 
-                    jecho("BUILD FAILED");
+                    print("BUILD FAILED");
                     return 1;
                 }
 
                 if (!obj_rebuild && !obj_exists)
                 {
                     obj_rebuild = true;
-                    jecho("Missing object ", objfile);
+                    print("Missing object ", objfile);
                 }
 
                 if (!obj_rebuild && obj_outdated)
                 {
                     obj_rebuild = true;
-                    jecho("Out-of-date object ", objfile);
+                    print("Out-of-date object ", objfile);
                 }
 
                 if (!obj_exists || obj_outdated)
@@ -427,7 +427,7 @@ int main(int argc, char* argv[])
                     objs_rebuild.emplace_back(ent.path());
                 }
 
-                jecho();
+                print();
             }
         }
     }
@@ -436,28 +436,28 @@ int main(int argc, char* argv[])
 
     if (!objs_rebuild.empty())
     {
-        jecho("Rebuilding ", objs_rebuild.size(), " objects...");
-        jecho();
+        print("Rebuilding ", objs_rebuild.size(), " objects...");
+        print();
 
         for (auto&& f : objs_rebuild)
         {
             auto success = build_obj(src, f, obj, cxxflags);
             if (!success)
             {
-                jecho("BUILD FAILED");
+                print("BUILD FAILED");
                 return 1;
             }
         }
     }
     else
     {
-        jecho("All objects are up-to-date!");
-        jecho();
+        print("All objects are up-to-date!");
+        print();
     }
 
     // BUILD EXECUTABLE
 
-    path exe = bin/"a.jout";
+    path exe = bin/"a.reprise";
     bool needs_build = false;
 
     if (!exists(exe))
@@ -485,10 +485,10 @@ int main(int argc, char* argv[])
         auto success = build_exe(exe, objs, ldflags, ldlibs);
         if (!success)
         {
-            jecho("BUILD FAILED");
+            print("BUILD FAILED");
             return 1;
         }
     }
 
-    jecho("BUILD SUCCESS");
+    print("BUILD SUCCESS");
 }
