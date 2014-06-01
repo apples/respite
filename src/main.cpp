@@ -14,6 +14,46 @@ using namespace std;
 using namespace boost;
 using namespace boost::filesystem;
 
+char const* getenv_safe(string const& var)
+{
+    static map<string,char const*> defaults = {
+        {"CXX","g++"},
+        {"CXXFLAGS","-Wall -O2"},
+        {"LDFLAGS",""},
+        {"LDLIBS",""},
+    };
+
+    char const* rv = getenv(var.c_str());
+    if (!rv) rv = defaults[var];
+    return rv;
+}
+
+struct Environment
+{
+    const path base;
+    const path src;
+    const path dep;
+    const path obj;
+    const path bin;
+
+    const string cxx;
+    const string cxxflags;
+    const string ldflags;
+    const string ldlibs;
+
+    Environment()
+        : base(current_path())
+        , src("src")
+        , dep(".reprise/dep")
+        , obj(".reprise/obj")
+        , bin(".")
+        , cxx(getenv_safe("CXX"))
+        , cxxflags(getenv_safe("CXXFLAGS"))
+        , ldflags(getenv_safe("LDFLAGS"))
+        , ldlibs(getenv_safe("LDLIBS"))
+    {}
+};
+
 path normalize(path source)
 {
     path rv;
@@ -60,10 +100,7 @@ string make_string(string str)
 template <typename... Ts>
 void print(Ts&&... us)
 {
-    vector<string> strs = {
-        make_string(us)...
-    };
-    cout << "[Reprise] ";
+    vector<string> strs = { make_string(us)... };
     for (auto&& str : strs)
         cout << str;
     cout << endl;
@@ -117,18 +154,23 @@ bool run_command(string const& exe, string const& args)
     es.start(exe, args);
 
     string line;
+    bool printed = false;
 
     while (getline(es.err(),line))
     {
         cerr << line << endl;
+        printed = true;
     }
+
+    if (printed)
+        cerr << endl;
 
     while (!es.close());
 
     return (es.exit_code() == 0);
 }
 
-vector<path> get_src_deps(path srcfile, string const& cxxflags)
+vector<path> get_src_deps(Environment const& env, path srcfile)
 {
     vector<path> deps;
     string word;
@@ -136,12 +178,12 @@ vector<path> get_src_deps(path srcfile, string const& cxxflags)
     stringstream args;
 
     args << "-MM -MT \"\" ";
-    args << cxxflags << " ";
+    args << env.cxxflags << " ";
     args << srcfile;
 
     exec_stream_t es;
     es.set_wait_timeout(exec_stream_t::s_all, 60000);
-    es.start("g++", args.str());
+    es.start(env.cxx, args.str());
 
     while (es.out() >> word)
     {
@@ -184,22 +226,19 @@ struct DepData
     time_t newest = time_t{};
 };
 
-DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
+DepData process_dep_file(Environment const& env, path ent)
 {
     DepData rv;
 
-    path deppath = dep/f;
+    path deppath = env.dep/ent;
     deppath.replace_extension(".dep");
     deppath = normalize(deppath);
 
     bool deppath_exists = exists(deppath);
 
-    print("Parsing depfile ", deppath);
-    print("  Depfile exists: ", (deppath_exists?"Yes":"No"));
-
     auto make_it = [&]
     {
-        auto newdeps = get_src_deps(src/f, cxxflags);
+        auto newdeps = get_src_deps(env, env.src/ent);
         write_dep_file(deppath, newdeps);
         return newdeps;
     };
@@ -229,7 +268,6 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
 
         if (!f_exists || f_newer)
         {
-            print("  Remaking depfile...");
             deps = make_it();
             reparse = true;
             rv.newest = time_t{};
@@ -265,94 +303,60 @@ DepData process_dep_file(path src, path f, path dep, string const& cxxflags)
     return rv;
 }
 
-bool build_obj(path src, path f, path obj, string const& cxxflags)
+bool build_obj(Environment const& env, path f)
 {
     stringstream args_ss;
 
-    path objfile = obj/f;
+    path objfile = env.obj/f;
     objfile.replace_extension(".o");
     objfile = normalize(objfile);
 
-    path srcfile = normalize(src/f);
+    path srcfile = normalize(env.src/f);
 
-    args_ss << cxxflags << " ";
+    args_ss << env.cxxflags << " ";
     args_ss << "-c " << srcfile << " ";
     args_ss << "-o " << objfile << " ";
 
     string args = args_ss.str();
 
     print("Building object ", objfile);
-    print("  Command: g++ ", args);
+    print("  Command: ", env.cxx, " ", args);
     print();
 
-    return run_command("g++", args);
+    return run_command(env.cxx, args);
 }
 
-bool build_exe(path exe, vector<path> const& objs, string const& ldflags, string const& ldlibs)
+bool build_exe(Environment const& env, path exe, vector<path> const& objs)
 {
     stringstream args_ss;
 
-    args_ss << ldflags << " ";
+    args_ss << env.ldflags << " ";
     for (auto&& p : objs)
         args_ss << normalize(p) << " ";
-    args_ss << ldlibs << " ";
+    args_ss << env.ldlibs << " ";
     args_ss << "-o " << normalize(exe) << " ";
 
     string args = args_ss.str();
 
     print("Building executable ", normalize(exe));
-    print("  Command: g++ ", args);
+    print("  Command: ", env.cxx, " ", args);
     print();
 
-    return run_command("g++", args);
+    return run_command(env.cxx, args);
 }
 
 int main(int argc, char* argv[])
 {
-    path base = current_path();
-
-    path src = "src";
-    path dep = ".reprise/dep";
-    path obj = ".reprise/obj";
-    path bin = ".";
-
-    // READ COMMAND LINE
-
-    stringstream ss3[3];
-
-    auto& ss_cxx = ss3[0];
-    auto& ss_ld = ss3[1];
-    auto& ss_libs = ss3[2];
-    stringstream* ssp = &ss3[0];
-
-    ++argv;
-
-    while (*argv)
-    {
-        string arg = *argv++;
-
-        if (arg == "---")
-        {
-            ++ssp;
-        }
-        else
-        {
-            *ssp << arg << " ";
-        }
-    }
-
-    string cxxflags = ss_cxx.str();
-    string ldflags = ss_ld.str();
-    string ldlibs = ss_libs.str();
+    Environment env;
 
     // CREATE DIRECTORIES
 
-    create_directories(dep);
-    create_directories(obj);
+    create_directories(env.dep);
+    create_directories(env.obj);
 
     auto src_files = [&]
     {
-        auto _ = push_dir(src);
+        auto _ = push_dir(env.src);
         return recursive_list(".");
     }();
 
@@ -367,12 +371,22 @@ int main(int argc, char* argv[])
                 create_directories(tget);
             };
 
-            make_it(dep);
-            make_it(obj);
+            make_it(env.dep);
+            make_it(env.obj);
         }
     }
 
     // GENERATE MISSING/OUTDATED DEP FILES
+
+    string src_exts[] = {".cpp", ".cxx", ".cc"};
+
+    auto is_impl_file = [&](path const& srcfile)
+    {
+        auto b = begin(src_exts);
+        auto e = end(src_exts);
+        auto i = find(b, e, srcfile.extension().string());
+        return (i != e);
+    };
 
     vector<path> objs;
     vector<path> objs_rebuild;
@@ -381,16 +395,12 @@ int main(int argc, char* argv[])
     {
         if (is_regular_file(ent.status()))
         {
-            auto ext = ent.path().extension().string();
-
-            path deppath = dep/ent.path();
-
-            if (ext == ".cpp")
+            if (is_impl_file(ent.path()))
             {
                 print("Found source file ", ent);
 
-                auto dep_data = process_dep_file(src, ent.path(), dep, cxxflags);
-                path objfile = obj/ent.path();
+                auto dep_data = process_dep_file(env, ent.path());
+                path objfile = env.obj/ent.path();
                 objfile.replace_extension(".o");
                 objfile = normalize(objfile);
 
@@ -413,13 +423,13 @@ int main(int argc, char* argv[])
                 if (!obj_rebuild && !obj_exists)
                 {
                     obj_rebuild = true;
-                    print("Missing object ", objfile);
+                    print("  Object missing.");
                 }
 
                 if (!obj_rebuild && obj_outdated)
                 {
                     obj_rebuild = true;
-                    print("Out-of-date object ", objfile);
+                    print("  Object out-of-date.");
                 }
 
                 if (!obj_exists || obj_outdated)
@@ -441,7 +451,7 @@ int main(int argc, char* argv[])
 
         for (auto&& f : objs_rebuild)
         {
-            auto success = build_obj(src, f, obj, cxxflags);
+            auto success = build_obj(env, f);
             if (!success)
             {
                 print("BUILD FAILED");
@@ -457,7 +467,7 @@ int main(int argc, char* argv[])
 
     // BUILD EXECUTABLE
 
-    path exe = bin/"a.reprise";
+    path exe = env.bin/"a.reprise";
     bool needs_build = false;
 
     if (!exists(exe))
@@ -482,7 +492,7 @@ int main(int argc, char* argv[])
 
     if (needs_build)
     {
-        auto success = build_exe(exe, objs, ldflags, ldlibs);
+        auto success = build_exe(env, exe, objs);
         if (!success)
         {
             print("BUILD FAILED");
