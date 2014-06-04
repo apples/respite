@@ -362,7 +362,6 @@ int main(int argc, char* argv[])
 
     for (auto&& ent : src_files)
     {
-        normalize(ent);
         if (is_directory(ent.status()))
         {
             auto make_it = [&](path tget)
@@ -393,7 +392,7 @@ int main(int argc, char* argv[])
 
     for (auto&& ent : src_files)
     {
-        if (is_regular_file(ent.status()))
+        if (!is_directory(ent.status()))
         {
             if (is_impl_file(ent.path()))
             {
