@@ -1,12 +1,18 @@
 #include <algorithm>
-#include <iterator>
-#include <iostream>
 #include <fstream>
-#include <sstream>
+#include <functional>
+#include <future>
+#include <iostream>
+#include <iterator>
+#include <list>
 #include <map>
+#include <mutex>
+#include <sstream>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
+
 #include <boost/filesystem.hpp>
 #include <exec-stream.h>
 
@@ -54,6 +60,12 @@ struct Environment
     {}
 };
 
+struct CommandResult
+{
+    string err;
+    bool success = true;
+};
+
 path normalize(path source)
 {
     path rv;
@@ -67,13 +79,9 @@ path normalize(path source)
         else if (p == "..")
         {
             if (rv.empty() || is_symlink(rv))
-            {
                 rv /= p;
-            }
             else
-            {
                 rv.remove_filename();
-            }
         }
         else
         {
@@ -84,25 +92,20 @@ path normalize(path source)
     return rv;
 }
 
-template <typename T>
-string make_string(T&& t)
-{
-    stringstream ss;
-    ss << t;
-    return ss.str();
-}
+inline void print_raw()
+{}
 
-string make_string(string str)
+template <typename T, typename... Ts>
+void print_raw(T&& t, Ts&&... ts)
 {
-    return str;
+    cout << t;
+    print_raw(ts...);
 }
 
 template <typename... Ts>
-void print(Ts&&... us)
+void print(Ts&&... ts)
 {
-    vector<string> strs = { make_string(us)... };
-    for (auto&& str : strs)
-        cout << str;
+    print_raw(ts...);
     cout << endl;
 }
 
@@ -146,28 +149,30 @@ _scope_cd_type push_dir(path p)
     return _scope_cd_type(p);
 }
 
-bool run_command(string const& exe, string const& args)
+CommandResult run_command(string const& exe, string const& args)
 {
+    CommandResult rv;
+
     exec_stream_t es;
     es.set_wait_timeout(exec_stream_t::s_all, 60000);
     es.set_buffer_limit(exec_stream_t::s_all, 0);
     es.start(exe, args);
 
     string line;
-    bool printed = false;
+    stringstream ss;
 
     while (getline(es.err(),line))
     {
-        cerr << line << endl;
-        printed = true;
+        ss << line << endl;
     }
 
-    if (printed)
-        cerr << endl;
+    rv.err = ss.str();
 
     while (!es.close());
 
-    return (es.exit_code() == 0);
+    rv.success = (es.exit_code() == 0);
+
+    return rv;
 }
 
 vector<path> get_src_deps(Environment const& env, path srcfile)
@@ -303,7 +308,7 @@ DepData process_dep_file(Environment const& env, path ent)
     return rv;
 }
 
-bool build_obj(Environment const& env, path f)
+CommandResult build_obj(Environment const& env, path f)
 {
     stringstream args_ss;
 
@@ -319,14 +324,14 @@ bool build_obj(Environment const& env, path f)
 
     string args = args_ss.str();
 
-    print("Building object ", objfile);
-    print("  Command: ", env.cxx, " ", args);
-    print();
+    //print("Building object ", objfile);
+    //print("  Command: ", env.cxx, " ", args);
+    //print();
 
     return run_command(env.cxx, args);
 }
 
-bool build_exe(Environment const& env, path exe, vector<path> const& objs)
+CommandResult build_exe(Environment const& env, path exe, vector<path> const& objs)
 {
     stringstream args_ss;
 
@@ -338,9 +343,9 @@ bool build_exe(Environment const& env, path exe, vector<path> const& objs)
 
     string args = args_ss.str();
 
-    print("Building executable ", normalize(exe));
-    print("  Command: ", env.cxx, " ", args);
-    print();
+    //print("Building executable ", normalize(exe));
+    //print("  Command: ", env.cxx, " ", args);
+    //print();
 
     return run_command(env.cxx, args);
 }
@@ -387,6 +392,7 @@ int main(int argc, char* argv[])
         return (i != e);
     };
 
+    vector<path> srcs;
     vector<path> objs;
     vector<path> objs_rebuild;
 
@@ -396,7 +402,8 @@ int main(int argc, char* argv[])
         {
             if (is_impl_file(ent.path()))
             {
-                print("Found source file ", ent);
+                //print("Found source file ", ent);
+                srcs.emplace_back(ent.path());
 
                 auto dep_data = process_dep_file(env, ent.path());
                 path objfile = env.obj/ent.path();
@@ -422,40 +429,132 @@ int main(int argc, char* argv[])
                 if (!obj_rebuild && !obj_exists)
                 {
                     obj_rebuild = true;
-                    print("  Object missing.");
+                    //print("  Object missing.");
                 }
 
                 if (!obj_rebuild && obj_outdated)
                 {
                     obj_rebuild = true;
-                    print("  Object out-of-date.");
+                    //print("  Object out-of-date.");
                 }
 
                 if (!obj_exists || obj_outdated)
                 {
                     objs_rebuild.emplace_back(ent.path());
                 }
-
-                print();
             }
         }
     }
 
+    print("Found ", srcs.size(), " source files.");
+
     // BUILD OBJS
+
+    list<CommandResult> results;
+    vector<unsigned> result_flags;
+    condition_variable results_ping;
+    int num_objs = objs_rebuild.size();
+    int objs_done = 0;
+    mutex results_mtx;
+
+    string progress_str;
+    unsigned progress_str_cap;
+
+    auto update_progress = [&]
+    {
+        if (!result_flags.empty())
+            progress_str[1+3*result_flags.back()] = '*';
+        int percent = objs_done*100/num_objs;
+        print_raw("\r", progress_str, " (", percent, "%)");
+    };
+
+    using Iter = decltype(begin(objs_rebuild));
+
+    auto builder = [&](Iter b, Iter e, unsigned c)
+    {
+        {
+            unique_lock<mutex> _ (results_mtx);
+        }
+
+        for (; b!=e; ++b)
+        {
+            {
+                unique_lock<mutex> _ (results_mtx);
+            }
+
+            list<CommandResult> tmp;
+            tmp.emplace_back(build_obj(env, *b));
+
+            {
+                unique_lock<mutex> _ (results_mtx);
+                results.splice(end(results), tmp);
+                ++objs_done;
+                update_progress();
+            }
+        }
+
+        {
+            unique_lock<mutex> _ (results_mtx);
+            result_flags.emplace_back(c);
+            update_progress();
+            if (result_flags.size() == progress_str_cap)
+                results_ping.notify_all();
+        }
+    };
 
     if (!objs_rebuild.empty())
     {
-        print("Rebuilding ", objs_rebuild.size(), " objects...");
-        print();
+        print("Building ", objs_rebuild.size(), " objects...");
 
-        for (auto&& f : objs_rebuild)
+        auto sz = objs_rebuild.size();
+        unsigned cores = max(thread::hardware_concurrency(), 1U);
+        if (cores<1) cores = 1;
+        auto workload = sz/cores;
+        auto spare = sz%cores;
+
+        vector<future<void>> threads;
+
+        result_flags.reserve(cores);
+
+        auto b = begin(objs_rebuild);
+        decltype(sz) start = 0;
+
         {
-            auto success = build_obj(env, f);
-            if (!success)
+            unique_lock<mutex> lck (results_mtx);
+
+            progress_str_cap = cores;
+
+            for (unsigned c=0; c<cores; ++c)
             {
-                print("BUILD FAILED");
-                return 1;
+                auto stop = start+workload;
+                if (c<spare) stop+=1;
+                threads.emplace_back(async(launch::async, builder, b+start, b+stop, c));
+                start = stop;
+                progress_str += "[ ]";
             }
+
+            print_raw("\r", progress_str);
+            while (result_flags.empty())
+                results_ping.wait(lck);
+            print();
+        }
+
+        for (auto&& f : threads)
+            f.get();
+
+        bool success = true;
+
+        for (auto&& res : results)
+        {
+            if (!res.success)
+                success = false;
+            cerr << endl << res.err << endl;
+        }
+
+        if (!success)
+        {
+            print("BUILD FAILED");
+            return 1;
         }
     }
     else
@@ -491,9 +590,11 @@ int main(int argc, char* argv[])
 
     if (needs_build)
     {
-        auto success = build_exe(env, exe, objs);
-        if (!success)
+        print("Building executable ", exe, "...");
+        auto res = build_exe(env, exe, objs);
+        if (!res.success)
         {
+            cerr << endl << res.err << endl;
             print("BUILD FAILED");
             return 1;
         }
