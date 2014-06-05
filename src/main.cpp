@@ -512,7 +512,7 @@ int main(int argc, char* argv[])
         auto workload = sz/cores;
         auto spare = sz%cores;
 
-        vector<future<void>> threads;
+        vector<thread> threads;
 
         result_flags.reserve(cores);
 
@@ -528,7 +528,7 @@ int main(int argc, char* argv[])
             {
                 auto stop = start+workload;
                 if (c<spare) stop+=1;
-                threads.emplace_back(async(launch::async, builder, b+start, b+stop, c));
+                threads.emplace_back(builder, b+start, b+stop, c);
                 start = stop;
                 progress_str += "[ ]";
             }
@@ -540,7 +540,7 @@ int main(int argc, char* argv[])
         }
 
         for (auto&& f : threads)
-            f.get();
+            f.join();
 
         bool success = true;
 
