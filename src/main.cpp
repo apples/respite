@@ -35,16 +35,10 @@ int main(int argc, char* argv[])
 
     for (auto&& ent : src_files)
     {
-        if (is_directory(ent.status()))
+        if (is_directory(env.src/ent))
         {
-            auto make_it = [&](path tget)
-            {
-                tget /= ent.path();
-                create_directories(tget);
-            };
-
-            make_it(env.dep);
-            make_it(env.obj);
+            create_directories(env.dep/ent.path());
+            create_directories(env.obj/ent.path());
         }
     }
 
