@@ -4,6 +4,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <condition_variable>
 #include <vector>
 
 #include <boost/filesystem.hpp>
