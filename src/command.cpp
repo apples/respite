@@ -1,33 +1,33 @@
 #include "command.hpp"
 
+#include "Poco/Pipe.h"
+#include "Poco/PipeStream.h"
+#include "Poco/Process.h"
+
 #include <string>
 #include <sstream>
-#include <exec-stream.h>
 
-using namespace std;
-
-CommandResult run_command(string const& exe, string const& args)
+CommandResult run_command(std::string const& exe, std::string const& args)
 {
     CommandResult rv;
 
-    exec_stream_t es;
-    es.set_wait_timeout(exec_stream_t::s_all, 60000);
-    es.set_buffer_limit(exec_stream_t::s_all, 0);
-    es.start(exe, args);
+    Poco::Pipe errPipe;
+    Poco::PipeInputStream errStream (errPipe);
+    auto handle = Poco::Process::launch(exe, {args}, nullptr, nullptr, &errPipe);
 
-    string line;
-    stringstream ss;
+    std::string line;
+    std::ostringstream ss;
 
-    while (getline(es.err(),line))
+    while (std::getline(errStream,line))
     {
-        ss << line << endl;
+        ss << line << "\n";
     }
 
     rv.err = ss.str();
 
-    while (!es.close());
+    auto exit_code = handle.wait();
 
-    rv.success = (es.exit_code() == 0);
+    rv.success = (exit_code == 0);
 
     return rv;
 }

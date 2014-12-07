@@ -21,6 +21,7 @@ CommandResult build_obj(Environment const& env, path f)
 
     path srcfile = normalize(env.src/f);
 
+    args_ss << env.cppflags << " ";
     args_ss << env.cxxflags << " ";
     args_ss << "-c " << srcfile << " ";
     args_ss << "-o " << objfile << " ";

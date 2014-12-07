@@ -12,7 +12,8 @@ char const* Environment::getenv_safe(std::string const& var) // static
 {
     static std::map<std::string,char const*> defaults = {
         {"CXX","g++"},
-        {"CXXFLAGS","-Wall -O2"},
+        {"CPPFLAGS",""},
+        {"CXXFLAGS","-std=c++11 -Wall -O2 -g"},
         {"LDFLAGS",""},
         {"LDLIBS",""},
     };
@@ -29,6 +30,7 @@ Environment::Environment()
     , obj(".respite/obj")
     , bin(".")
     , cxx(getenv_safe("CXX"))
+    , cppflags(getenv_safe("CPPFLAGS"))
     , cxxflags(getenv_safe("CXXFLAGS"))
     , ldflags(getenv_safe("LDFLAGS"))
     , ldlibs(getenv_safe("LDLIBS"))

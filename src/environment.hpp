@@ -15,6 +15,7 @@ struct Environment
     const boost::filesystem::path bin;
 
     const std::string cxx;
+    const std::string cppflags;
     const std::string cxxflags;
     const std::string ldflags;
     const std::string ldlibs;

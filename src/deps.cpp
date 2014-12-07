@@ -6,7 +6,9 @@
 #include <sstream>
 #include <string>
 #include <vector>
-#include <exec-stream.h>
+#include "Poco/Process.h"
+#include "Poco/Pipe.h"
+#include "Poco/PipeStream.h"
 #include <boost/filesystem.hpp>
 
 #include "filesystem_utils.hpp"
@@ -25,11 +27,11 @@ vector<path> get_src_deps(Environment const& env, path srcfile)
     args << env.cxxflags << " ";
     args << srcfile;
 
-    exec_stream_t es;
-    es.set_wait_timeout(exec_stream_t::s_all, 60000);
-    es.start(env.cxx, args.str());
+    Poco::Pipe outPipe;
+    Poco::PipeInputStream pin (outPipe);
+    auto handle = Poco::Process::launch(env.cxx, {args.str()}, nullptr, &outPipe, nullptr);
 
-    while (es.out() >> word)
+    while (pin >> word)
     {
         if (word != ":" && word != "\\")
             deps.push_back(word);
