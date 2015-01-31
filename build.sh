@@ -11,7 +11,15 @@ for f in `find src/ -name '*.cpp'`
 do
     objname=obj/${f#src/}
     objname=${objname/.cpp/.o}
-    $CXX $CPPFLAGS $CXXFLAGS -c $f -o $objname
+    if ! $CXX $CPPFLAGS $CXXFLAGS -c $f -o $objname
+    then
+        echo "BUILD FAILURE" >&2
+        exit 1
+    fi
 done
 
-$CXX $CXXFLAGS $LDFLAGS `find obj/ -name '*.o'` $LDLIBS -o respite
+if ! $CXX $CXXFLAGS $LDFLAGS `find obj/ -name '*.o'` $LDLIBS -o respite
+then
+    echo "LINK FAILURE" >&2
+    exit 1
+fi
